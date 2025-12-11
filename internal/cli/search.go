@@ -152,7 +152,7 @@ func downloadThread(ctx context.Context, client *gmail.Client, threadID, outDir 
 	}
 
 	formatter := output.NewTextFormatter()
-	fmt.Print(formatter.FormatThread(thread, savedAttachments))
+	fmt.Print(formatter.FormatThread(thread, savedAttachments, output.FormatOptions{}))
 
 	return nil
 }

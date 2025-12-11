@@ -11,8 +11,10 @@ import (
 )
 
 var (
-	downloadOutputDir  string
-	downloadNoAttach   bool
+	downloadOutputDir   string
+	downloadNoAttach    bool
+	downloadReverse     bool
+	downloadMessagesOnly bool
 )
 
 var downloadCmd = &cobra.Command{
@@ -24,7 +26,8 @@ Thread content is written to stdout. Attachments are saved to --output-dir.
 
 Examples:
   gmail-cli download 18c1234abcd5678 --output-dir ./emails
-  gmail-cli download 18c1234abcd5678 --no-attachments`,
+  gmail-cli download 18c1234abcd5678 --no-attachments
+  gmail-cli download 18c1234abcd5678 --reverse --messages-only`,
 	Args: cobra.ExactArgs(1),
 	RunE: runDownload,
 }
@@ -32,6 +35,8 @@ Examples:
 func init() {
 	downloadCmd.Flags().StringVarP(&downloadOutputDir, "output-dir", "o", "", "Directory to save attachments")
 	downloadCmd.Flags().BoolVar(&downloadNoAttach, "no-attachments", false, "Skip downloading attachments")
+	downloadCmd.Flags().BoolVarP(&downloadReverse, "reverse", "r", false, "Display messages in reverse order (newest first)")
+	downloadCmd.Flags().BoolVarP(&downloadMessagesOnly, "messages-only", "m", false, "Strip quoted content, showing only new message text")
 	rootCmd.AddCommand(downloadCmd)
 }
 
@@ -87,7 +92,11 @@ func runDownload(cmd *cobra.Command, args []string) error {
 	}
 
 	formatter := output.NewTextFormatter()
-	fmt.Print(formatter.FormatThread(thread, savedAttachments))
+	opts := output.FormatOptions{
+		Reverse:      downloadReverse,
+		MessagesOnly: downloadMessagesOnly,
+	}
+	fmt.Print(formatter.FormatThread(thread, savedAttachments, opts))
 
 	return nil
 }

@@ -2,6 +2,7 @@ package output
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/bentsolheim/gmail-cli/internal/gmail"
@@ -20,7 +21,7 @@ import (
 //
 // Attachments:
 // - conversion_factors.xlsx (saved to: /path/to/output/conversion_factors.xlsx)
-func (f *TextFormatter) FormatThread(thread *gmail.Thread, savedAttachments map[string]string) string {
+func (f *TextFormatter) FormatThread(thread *gmail.Thread, savedAttachments map[string]string, opts FormatOptions) string {
 	var sb strings.Builder
 
 	// Header
@@ -29,15 +30,31 @@ func (f *TextFormatter) FormatThread(thread *gmail.Thread, savedAttachments map[
 	fmt.Fprintf(&sb, "Date Range: %s\n", formatDateRange(thread.DateRange))
 	sb.WriteString("\n")
 
+	// Build message indices for proper numbering (always chronological)
+	// but display order can be reversed
+	messages := thread.Messages
+	indices := make([]int, len(messages))
+	for i := range indices {
+		indices[i] = i
+	}
+
+	if opts.Reverse {
+		slices.Reverse(indices)
+	}
+
 	// Messages
-	for i, msg := range thread.Messages {
-		// Message header
+	for _, idx := range indices {
+		msg := messages[idx]
+		// Message header - number is always chronological (1 = oldest)
 		date := msg.Date.Format("Jan 2, 3:04 PM")
-		fmt.Fprintf(&sb, "--- Message %d (%s) ---\n", i+1, date)
+		fmt.Fprintf(&sb, "--- Message %d (%s) ---\n", idx+1, date)
 		fmt.Fprintf(&sb, "From: %s\n", msg.From)
 
 		// Message body
 		body := strings.TrimSpace(msg.Body)
+		if opts.MessagesOnly {
+			body = StripQuotedContent(body)
+		}
 		if body != "" {
 			sb.WriteString(body)
 			sb.WriteString("\n")
