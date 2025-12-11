@@ -46,31 +46,10 @@ func (f *TextFormatter) FormatSearchResults(results []gmail.ThreadSummary) strin
 		counts := strings.Join(countParts, ", ")
 
 		// Write the line
-		fmt.Fprintf(&sb, "[%d] %s | %s | %s (%s)\n",
-			i+1, date, participants, r.Subject, counts)
+		fmt.Fprintf(&sb, "[%d] %s | %s | %s | %s (%s)\n",
+			i+1, r.ID, date, participants, r.Subject, counts)
 	}
 
 	return sb.String()
 }
 
-// FormatSearchResultsWithIDs formats search results including thread IDs.
-// Useful for programmatic use or debugging.
-func (f *TextFormatter) FormatSearchResultsWithIDs(results []gmail.ThreadSummary) string {
-	if len(results) == 0 {
-		return "No results found."
-	}
-
-	var sb strings.Builder
-	for i, r := range results {
-		date := r.LastMessageDate.Format("Jan 2")
-		participants := strings.Join(r.Participants, ", ")
-		if len(participants) > 30 {
-			participants = participants[:27] + "..."
-		}
-
-		fmt.Fprintf(&sb, "[%d] %s | %s | %s | ID: %s\n",
-			i+1, date, participants, r.Subject, r.ID)
-	}
-
-	return sb.String()
-}
