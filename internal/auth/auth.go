@@ -57,7 +57,7 @@ func loadOAuthConfig() (*oauth2.Config, error) {
 		return nil, fmt.Errorf("unable to read credentials file at %s: %w\n\nTo set up authentication:\n1. Go to https://console.cloud.google.com/\n2. Create a project and enable the Gmail API\n3. Create OAuth 2.0 credentials (Desktop app)\n4. Download the credentials and save as %s", credPath, err, credPath)
 	}
 
-	cfg, err := google.ConfigFromJSON(b, gmail.GmailReadonlyScope)
+	cfg, err := google.ConfigFromJSON(b, gmail.GmailReadonlyScope, gmail.GmailComposeScope)
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse credentials: %w", err)
 	}

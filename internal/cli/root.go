@@ -7,8 +7,8 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:     "gmail-cli",
-	Short:   "A read-only Gmail CLI tool",
-	Long:    `gmail-cli is a read-only Gmail CLI tool designed for agent/LLM consumption. It enables searching Gmail, listing results, and downloading complete email threads with attachments.`,
+	Short:   "A Gmail CLI tool",
+	Long:    `gmail-cli is a Gmail CLI tool designed for agent/LLM consumption. It enables searching Gmail, listing results, downloading complete email threads with attachments, and creating drafts.`,
 	Version: version.String(),
 }
 
