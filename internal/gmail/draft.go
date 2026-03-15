@@ -78,6 +78,8 @@ func wrapHTML(body string) string {
 h1, h2 { font-size: 1.2em; margin: 0.5em 0 0 0; }
 h3, h4, h5, h6 { font-size: 1.1em; margin: 0.5em 0 0 0; }
 h1 + p, h2 + p, h3 + p, h4 + p, h5 + p, h6 + p { margin-top: 0.2em; }
+p + ul, p + ol { margin-top: -0.5em; }
+ul, ol { padding-left: 1.5em; }
 table { border-collapse: collapse; margin: 8px 0; }
 th, td { border: 1pt solid #333; padding: 4px 8px; }
 th { text-align: center; font-weight: bold; }
