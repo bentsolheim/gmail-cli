@@ -215,6 +215,58 @@ func TestBuildMIMEMessage_NonASCIISubject(t *testing.T) {
 	}
 }
 
+func TestExtractSubject(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		wantSubject string
+		wantBody    string
+	}{
+		{
+			name:        "with heading",
+			input:       "# My Subject\n\nBody text here",
+			wantSubject: "My Subject",
+			wantBody:    "Body text here",
+		},
+		{
+			name:        "no heading",
+			input:       "Just a body\nwith lines",
+			wantSubject: "",
+			wantBody:    "Just a body\nwith lines",
+		},
+		{
+			name:        "h2 is not subject",
+			input:       "## Section\n\nBody",
+			wantSubject: "",
+			wantBody:    "## Section\n\nBody",
+		},
+		{
+			name:        "heading with extra whitespace",
+			input:       "#   Spaced Title  \n\nBody",
+			wantSubject: "Spaced Title",
+			wantBody:    "Body",
+		},
+		{
+			name:        "heading only no body",
+			input:       "# Just a Title",
+			wantSubject: "Just a Title",
+			wantBody:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			subject, body := ExtractSubject(tt.input)
+			if subject != tt.wantSubject {
+				t.Errorf("subject = %q, want %q", subject, tt.wantSubject)
+			}
+			if body != tt.wantBody {
+				t.Errorf("body = %q, want %q", body, tt.wantBody)
+			}
+		})
+	}
+}
+
 // extractHeader extracts a header value from a raw RFC 2822 message string.
 func extractHeader(raw string, name string) string {
 	headers := textproto.NewReader(bufio.NewReader(strings.NewReader(raw)))

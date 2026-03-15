@@ -32,9 +32,19 @@ var draftCreateCmd = &cobra.Command{
 The markdown body is read from stdin and converted to both plain text
 and HTML for multipart email display. The draft is saved but NOT sent.
 
+Heading convention:
+  #    → extracted as email subject (removed from body)
+  ##   → primary heading
+  ###  → secondary heading
+  ####+ → same style as ###
+
+If --subject is provided, it overrides any # heading in the markdown.
+If neither --subject nor a # heading is present, an error is returned.
+
 Examples:
-  echo "Hello **world**" | gmail-cli draft create --to user@example.com --subject "Test"
-  gmail-cli draft create --to a@x.com --cc b@x.com --subject "Meeting" < notes.md`,
+  gmail-cli draft create --to a@x.com < email.md
+  echo "# Subject\n\nBody" | gmail-cli draft create --to user@example.com
+  gmail-cli draft create --to a@x.com --subject "Override" < email.md`,
 	RunE: runDraftCreate,
 }
 
@@ -44,7 +54,6 @@ func init() {
 	draftCreateCmd.Flags().StringSliceVar(&draftBcc, "bcc", nil, "BCC recipient (can be specified multiple times)")
 	draftCreateCmd.Flags().StringVar(&draftSubject, "subject", "", "Email subject line")
 	_ = draftCreateCmd.MarkFlagRequired("to")
-	_ = draftCreateCmd.MarkFlagRequired("subject")
 
 	draftCmd.AddCommand(draftCreateCmd)
 	rootCmd.AddCommand(draftCmd)
@@ -69,13 +78,28 @@ func runDraftCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("stdin was empty; provide markdown content for the email body")
 	}
 
+	// Extract subject from # heading if --subject not provided
+	subject := draftSubject
+	if subject == "" {
+		extracted, remaining := gmail.ExtractSubject(markdownBody)
+		if extracted == "" {
+			return fmt.Errorf("no --subject flag and no '# Title' heading found in markdown")
+		}
+		subject = extracted
+		markdownBody = remaining
+	} else {
+		// --subject provided: still strip the # heading from the body if present
+		_, remaining := gmail.ExtractSubject(markdownBody)
+		markdownBody = remaining
+	}
+
 	ctx := context.Background()
 	client, err := gmail.NewClient(ctx)
 	if err != nil {
 		return err
 	}
 
-	result, err := client.CreateDraft(ctx, draftTo, draftCc, draftBcc, draftSubject, markdownBody)
+	result, err := client.CreateDraft(ctx, draftTo, draftCc, draftBcc, subject, markdownBody)
 	if err != nil {
 		return err
 	}

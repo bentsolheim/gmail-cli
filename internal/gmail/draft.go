@@ -75,9 +75,9 @@ func wrapHTML(body string) string {
 <head><meta charset="UTF-8"></head>
 <body style="font-family: sans-serif; line-height: 1.5;">
 <style>
-h1 { font-size: 1.2em; margin: 0.5em 0 0 0; }
-h2 { font-size: 1.1em; margin: 0.5em 0 0 0; }
-h1 + p, h2 + p { margin-top: 0.2em; }
+h1, h2 { font-size: 1.2em; margin: 0.5em 0 0 0; }
+h3, h4, h5, h6 { font-size: 1.1em; margin: 0.5em 0 0 0; }
+h1 + p, h2 + p, h3 + p, h4 + p, h5 + p, h6 + p { margin-top: 0.2em; }
 table { border-collapse: collapse; margin: 8px 0; }
 th, td { border: 1pt solid #333; padding: 4px 8px; }
 th { text-align: center; font-weight: bold; }
@@ -89,6 +89,22 @@ blockquote { border-left: 3px solid #ccc; margin: 8px 0; padding-left: 12px; col
 ` + body + `
 </body>
 </html>`
+}
+
+// ExtractSubject extracts a subject from a leading `# Title` line in markdown.
+// Returns the extracted subject and the remaining body with the heading removed.
+// If no `# Title` is found, returns empty subject and the original body unchanged.
+func ExtractSubject(markdown string) (subject, body string) {
+	lines := strings.SplitN(markdown, "\n", 2)
+	firstLine := strings.TrimSpace(lines[0])
+	if strings.HasPrefix(firstLine, "# ") && !strings.HasPrefix(firstLine, "## ") {
+		subject = strings.TrimSpace(firstLine[2:])
+		if len(lines) > 1 {
+			body = strings.TrimSpace(lines[1])
+		}
+		return subject, body
+	}
+	return "", markdown
 }
 
 // buildMIMEMessage constructs an RFC 2822 multipart/alternative message.
