@@ -101,7 +101,7 @@ func TestBuildMIMEMessage(t *testing.T) {
 	plain := "Hello **world**"
 	html := "<html><body><p>Hello <strong>world</strong></p></body></html>"
 
-	raw, err := buildMIMEMessage(to, cc, bcc, subject, plain, html)
+	raw, err := buildMIMEMessage(to, cc, bcc, subject, plain, html, nil)
 	if err != nil {
 		t.Fatalf("buildMIMEMessage() error: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestBuildMIMEMessage(t *testing.T) {
 }
 
 func TestBuildMIMEMessage_EmptyOptionalFields(t *testing.T) {
-	raw, err := buildMIMEMessage([]string{"alice@example.com"}, nil, nil, "Test", "body", "<p>body</p>")
+	raw, err := buildMIMEMessage([]string{"alice@example.com"}, nil, nil, "Test", "body", "<p>body</p>", nil)
 	if err != nil {
 		t.Fatalf("buildMIMEMessage() error: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestBuildMIMEMessage_EmptyOptionalFields(t *testing.T) {
 }
 
 func TestBuildMIMEMessage_NonASCIISubject(t *testing.T) {
-	raw, err := buildMIMEMessage([]string{"a@b.com"}, nil, nil, "Ærlig talt — norsk emne", "body", "<p>body</p>")
+	raw, err := buildMIMEMessage([]string{"a@b.com"}, nil, nil, "Ærlig talt — norsk emne", "body", "<p>body</p>", nil)
 	if err != nil {
 		t.Fatalf("buildMIMEMessage() error: %v", err)
 	}
@@ -212,6 +212,27 @@ func TestBuildMIMEMessage_NonASCIISubject(t *testing.T) {
 	}
 	if decoded != "Ærlig talt — norsk emne" {
 		t.Errorf("decoded subject = %q, want %q", decoded, "Ærlig talt — norsk emne")
+	}
+}
+
+func TestBuildMIMEMessage_WithReplyContext(t *testing.T) {
+	reply := &ReplyContext{
+		ThreadID:   "thread123",
+		InReplyTo:  "<msg123@example.com>",
+		References: "<msg100@example.com> <msg123@example.com>",
+	}
+	raw, err := buildMIMEMessage([]string{"a@b.com"}, nil, nil, "Re: Test", "reply body", "<p>reply body</p>", reply)
+	if err != nil {
+		t.Fatalf("buildMIMEMessage() error: %v", err)
+	}
+
+	msg := string(raw)
+
+	if !strings.Contains(msg, "In-Reply-To: <msg123@example.com>\r\n") {
+		t.Error("missing In-Reply-To header")
+	}
+	if !strings.Contains(msg, "References: <msg100@example.com> <msg123@example.com>\r\n") {
+		t.Error("missing References header")
 	}
 }
 

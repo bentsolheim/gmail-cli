@@ -30,9 +30,11 @@ type DateRange struct {
 // Message represents a single email message within a thread.
 type Message struct {
 	ID          string
+	MessageID   string // RFC 2822 Message-ID header
 	From        string
 	Date        time.Time
 	Body        string
+	HTMLBody    string
 	Attachments []Attachment
 }
 

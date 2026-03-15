@@ -57,11 +57,14 @@ func (c *Client) GetThread(ctx context.Context, threadID string) (*Thread, error
 						latestDate = t
 					}
 				}
+			case "Message-ID":
+				msg.MessageID = header.Value
 			}
 		}
 
 		// Extract body
 		msg.Body = extractBody(gmailMsg.Payload)
+		msg.HTMLBody = extractHTMLBody(gmailMsg.Payload)
 
 		// Extract attachments
 		msg.Attachments = extractAttachments(gmailMsg.Id, gmailMsg.Payload)
@@ -121,6 +124,25 @@ func extractBody(part *gmail.MessagePart) string {
 		}
 	}
 
+	return ""
+}
+
+// extractHTMLBody recursively extracts the raw HTML body from a message part.
+func extractHTMLBody(part *gmail.MessagePart) string {
+	if part == nil {
+		return ""
+	}
+	if part.MimeType == "text/html" && part.Body != nil && part.Body.Data != "" {
+		decoded, err := base64.URLEncoding.DecodeString(part.Body.Data)
+		if err == nil {
+			return string(decoded)
+		}
+	}
+	for _, p := range part.Parts {
+		if b := extractHTMLBody(p); b != "" {
+			return b
+		}
+	}
 	return ""
 }
 

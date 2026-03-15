@@ -22,23 +22,85 @@ type DraftResult struct {
 	MessageID string
 }
 
+// ReplyContext holds threading information for creating reply drafts.
+type ReplyContext struct {
+	ThreadID   string
+	Subject    string // original subject
+	InReplyTo  string // Message-ID of the message being replied to
+	References string // space-separated chain of Message-IDs
+
+	// Quoted content from the original message
+	QuotedFrom    string
+	QuotedDate    string
+	QuotedPlain   string // plain text body of original
+	QuotedHTML    string // HTML body of original
+}
+
+// GetReplyContext fetches a thread and builds the context needed for a reply draft.
+func (c *Client) GetReplyContext(ctx context.Context, threadID string) (*ReplyContext, error) {
+	thread, err := c.GetThread(ctx, threadID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch thread %s: %w", threadID, err)
+	}
+
+	if len(thread.Messages) == 0 {
+		return nil, fmt.Errorf("thread %s has no messages", threadID)
+	}
+
+	lastMsg := thread.Messages[len(thread.Messages)-1]
+
+	// Build References chain from all messages with Message-IDs
+	var refIDs []string
+	for _, msg := range thread.Messages {
+		if msg.MessageID != "" {
+			refIDs = append(refIDs, msg.MessageID)
+		}
+	}
+
+	rc := &ReplyContext{
+		ThreadID:    threadID,
+		Subject:     thread.Subject,
+		InReplyTo:   lastMsg.MessageID,
+		References:  strings.Join(refIDs, " "),
+		QuotedFrom:  lastMsg.From,
+		QuotedDate:  lastMsg.Date.Format("Mon, Jan 2, 2006 at 3:04 PM"),
+		QuotedPlain: lastMsg.Body,
+		QuotedHTML:  lastMsg.HTMLBody,
+	}
+
+	return rc, nil
+}
+
 // CreateDraft creates a Gmail draft from markdown content.
-func (c *Client) CreateDraft(ctx context.Context, to, cc, bcc []string, subject, markdownBody string) (*DraftResult, error) {
+// If reply is non-nil, the draft is created as a reply within that thread.
+func (c *Client) CreateDraft(ctx context.Context, to, cc, bcc []string, subject, markdownBody string, reply *ReplyContext) (*DraftResult, error) {
 	htmlBody, err := renderMarkdown(markdownBody)
 	if err != nil {
 		return nil, err
 	}
 
-	rawMsg, err := buildMIMEMessage(to, cc, bcc, subject, markdownBody, htmlBody)
+	plainText := markdownBody
+
+	// Append quoted original if replying with quote content
+	if reply != nil && reply.QuotedPlain != "" {
+		attribution := fmt.Sprintf("On %s, %s wrote:", reply.QuotedDate, reply.QuotedFrom)
+		plainText += "\n\n---------- " + attribution + " ----------\n\n" + reply.QuotedPlain
+		htmlBody = appendQuotedHTML(htmlBody, attribution, reply.QuotedHTML, reply.QuotedPlain)
+	}
+
+	rawMsg, err := buildMIMEMessage(to, cc, bcc, subject, plainText, htmlBody, reply)
 	if err != nil {
 		return nil, err
 	}
 
-	draft := &gmail.Draft{
-		Message: &gmail.Message{
-			Raw: base64.URLEncoding.EncodeToString(rawMsg),
-		},
+	draftMsg := &gmail.Message{
+		Raw: base64.URLEncoding.EncodeToString(rawMsg),
 	}
+	if reply != nil {
+		draftMsg.ThreadId = reply.ThreadID
+	}
+
+	draft := &gmail.Draft{Message: draftMsg}
 
 	created, err := c.service.Users.Drafts.Create(c.userID, draft).Context(ctx).Do()
 	if err != nil {
@@ -52,6 +114,62 @@ func (c *Client) CreateDraft(ctx context.Context, to, cc, bcc []string, subject,
 		DraftID:   created.Id,
 		MessageID: created.Message.Id,
 	}, nil
+}
+
+// appendQuotedHTML appends quoted original content to a reply HTML body.
+// Uses a separator line with attribution rather than a blockquote, for cleaner rendering.
+func appendQuotedHTML(replyHTML, attribution, originalHTML, originalPlain string) string {
+	// Strip closing </body></html> from reply
+	replyHTML = strings.TrimSuffix(replyHTML, "\n</body>\n</html>")
+
+	var quoted strings.Builder
+	quoted.WriteString(replyHTML)
+	quoted.WriteString("\n<br>\n<div class=\"gmail_quote\">\n")
+	quoted.WriteString(fmt.Sprintf("<div style=\"margin: 1em 0 0.5em 0; padding-top: 0.5em; border-top: 1px solid #ccc; color: #555; font-size: 0.9em;\">%s</div>\n", attribution))
+
+	if originalHTML != "" {
+		quoted.WriteString(stripOuterHTMLTags(originalHTML))
+	} else {
+		quoted.WriteString("<pre>")
+		quoted.WriteString(originalPlain)
+		quoted.WriteString("</pre>")
+	}
+
+	quoted.WriteString("\n</div>\n</body>\n</html>")
+	return quoted.String()
+}
+
+// stripOuterHTMLTags removes the outer html/head/body tags from an HTML document,
+// leaving only the inner content suitable for embedding.
+func stripOuterHTMLTags(html string) string {
+	s := html
+	// Remove <!DOCTYPE ...>
+	if idx := strings.Index(strings.ToLower(s), "<!doctype"); idx >= 0 {
+		if end := strings.Index(s[idx:], ">"); end > 0 {
+			s = s[:idx] + s[idx+end+1:]
+		}
+	}
+	// Remove <html...>
+	if idx := strings.Index(strings.ToLower(s), "<html"); idx >= 0 {
+		if end := strings.Index(s[idx:], ">"); end > 0 {
+			s = s[:idx] + s[idx+end+1:]
+		}
+	}
+	s = strings.ReplaceAll(s, "</html>", "")
+	// Remove <head>...</head>
+	if start := strings.Index(strings.ToLower(s), "<head"); start >= 0 {
+		if end := strings.Index(strings.ToLower(s[start:]), "</head>"); end > 0 {
+			s = s[:start] + s[start+end+7:]
+		}
+	}
+	// Remove <body...>
+	if idx := strings.Index(strings.ToLower(s), "<body"); idx >= 0 {
+		if end := strings.Index(s[idx:], ">"); end > 0 {
+			s = s[:idx] + s[idx+end+1:]
+		}
+	}
+	s = strings.ReplaceAll(s, "</body>", "")
+	return strings.TrimSpace(s)
 }
 
 // renderMarkdown converts markdown source to HTML using goldmark with GFM extensions.
@@ -110,7 +228,7 @@ func ExtractSubject(markdown string) (subject, body string) {
 }
 
 // buildMIMEMessage constructs an RFC 2822 multipart/alternative message.
-func buildMIMEMessage(to, cc, bcc []string, subject, plainText, htmlBody string) ([]byte, error) {
+func buildMIMEMessage(to, cc, bcc []string, subject, plainText, htmlBody string, reply *ReplyContext) ([]byte, error) {
 	// Build MIME body parts
 	var body bytes.Buffer
 	mpw := multipart.NewWriter(&body)
@@ -151,6 +269,12 @@ func buildMIMEMessage(to, cc, bcc []string, subject, plainText, htmlBody string)
 		fmt.Fprintf(&msg, "Bcc: %s\r\n", strings.Join(bcc, ", "))
 	}
 	fmt.Fprintf(&msg, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", subject))
+	if reply != nil && reply.InReplyTo != "" {
+		fmt.Fprintf(&msg, "In-Reply-To: %s\r\n", reply.InReplyTo)
+	}
+	if reply != nil && reply.References != "" {
+		fmt.Fprintf(&msg, "References: %s\r\n", reply.References)
+	}
 	fmt.Fprintf(&msg, "MIME-Version: 1.0\r\n")
 	fmt.Fprintf(&msg, "Content-Type: multipart/alternative; boundary=%q\r\n", mpw.Boundary())
 	fmt.Fprintf(&msg, "\r\n")

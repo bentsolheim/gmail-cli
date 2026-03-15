@@ -16,6 +16,8 @@ var (
 	draftCc      []string
 	draftBcc     []string
 	draftSubject string
+	draftReplyTo string
+	draftNoQuote bool
 )
 
 var draftCmd = &cobra.Command{
@@ -39,12 +41,22 @@ Heading convention:
   ####+ → same style as ###
 
 If --subject is provided, it overrides any # heading in the markdown.
-If neither --subject nor a # heading is present, an error is returned.
+If neither --subject nor a # heading is present, an error is returned
+(unless --reply-to is used, which defaults to "Re: <original subject>").
+
+Reply drafts:
+  Use --reply-to <thread-id> to create a reply within an existing thread.
+  The original message is included below a separator line by default.
+  Use --no-quote to omit the original message.
+
+  Note: a blockquote style was considered for quoting but rejected in favor
+  of a separator line with attribution, which renders more cleanly in Gmail.
 
 Examples:
   gmail-cli draft create --to a@x.com < email.md
   echo "# Subject\n\nBody" | gmail-cli draft create --to user@example.com
-  gmail-cli draft create --to a@x.com --subject "Override" < email.md`,
+  gmail-cli draft create --to a@x.com --subject "Override" < email.md
+  echo "Thanks" | gmail-cli draft create --to a@x.com --reply-to <thread-id>`,
 	RunE: runDraftCreate,
 }
 
@@ -53,6 +65,8 @@ func init() {
 	draftCreateCmd.Flags().StringSliceVar(&draftCc, "cc", nil, "CC recipient (can be specified multiple times)")
 	draftCreateCmd.Flags().StringSliceVar(&draftBcc, "bcc", nil, "BCC recipient (can be specified multiple times)")
 	draftCreateCmd.Flags().StringVar(&draftSubject, "subject", "", "Email subject line")
+	draftCreateCmd.Flags().StringVar(&draftReplyTo, "reply-to", "", "Thread ID to reply to")
+	draftCreateCmd.Flags().BoolVar(&draftNoQuote, "no-quote", false, "Omit original message when replying")
 	_ = draftCreateCmd.MarkFlagRequired("to")
 
 	draftCmd.AddCommand(draftCreateCmd)
@@ -78,18 +92,9 @@ func runDraftCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("stdin was empty; provide markdown content for the email body")
 	}
 
-	// Extract subject from # heading if --subject not provided
-	subject := draftSubject
-	if subject == "" {
-		extracted, remaining := gmail.ExtractSubject(markdownBody)
-		if extracted == "" {
-			return fmt.Errorf("no --subject flag and no '# Title' heading found in markdown")
-		}
-		subject = extracted
-		markdownBody = remaining
-	} else {
-		// --subject provided: still strip the # heading from the body if present
-		_, remaining := gmail.ExtractSubject(markdownBody)
+	// Strip # heading from body (used as subject if no --subject flag)
+	extracted, remaining := gmail.ExtractSubject(markdownBody)
+	if extracted != "" {
 		markdownBody = remaining
 	}
 
@@ -99,7 +104,35 @@ func runDraftCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	result, err := client.CreateDraft(ctx, draftTo, draftCc, draftBcc, subject, markdownBody)
+	// Build reply context if --reply-to is set
+	var reply *gmail.ReplyContext
+	if draftReplyTo != "" {
+		reply, err = client.GetReplyContext(ctx, draftReplyTo)
+		if err != nil {
+			return err
+		}
+		if draftNoQuote {
+			reply.QuotedPlain = ""
+			reply.QuotedHTML = ""
+		}
+	}
+
+	// Determine subject: --subject flag > # heading > Re: original (for replies)
+	subject := draftSubject
+	if subject == "" {
+		subject = extracted
+	}
+	if subject == "" && reply != nil {
+		subject = reply.Subject
+		if !strings.HasPrefix(strings.ToLower(subject), "re:") {
+			subject = "Re: " + subject
+		}
+	}
+	if subject == "" {
+		return fmt.Errorf("no --subject flag, no '# Title' heading, and no --reply-to thread to derive subject from")
+	}
+
+	result, err := client.CreateDraft(ctx, draftTo, draftCc, draftBcc, subject, markdownBody, reply)
 	if err != nil {
 		return err
 	}
