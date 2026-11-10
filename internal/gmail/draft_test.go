@@ -2,9 +2,12 @@ package gmail
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/base64"
 	"io"
 	"mime"
 	"mime/multipart"
+	"net/mail"
 	"net/textproto"
 	"strings"
 	"testing"
@@ -286,6 +289,127 @@ func TestExtractSubject(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildMIMEMessage_WithAttachments(t *testing.T) {
+	// 200 bytes covering every byte value, so the base64 runs over several lines.
+	pdf := make([]byte, 200)
+	for i := range pdf {
+		pdf[i] = byte(i)
+	}
+	attachments := []DraftAttachment{
+		{Filename: "report.pdf", Data: pdf},
+		{Filename: "kvittering æøå.unknownext", Data: []byte("x")},
+		{Filename: "notes.bin", ContentType: "text/plain; charset=utf-8", Data: []byte("hei")},
+	}
+
+	raw, err := buildMIMEMessage([]string{"a@example.com"}, nil, nil, "Subject", "plain body", "<p>html body</p>", nil, attachments...)
+	if err != nil {
+		t.Fatalf("buildMIMEMessage() error: %v", err)
+	}
+
+	parts := readParts(t, raw, "multipart/mixed")
+	if len(parts) != 4 {
+		t.Fatalf("got %d parts, want the text body and 3 attachments", len(parts))
+	}
+
+	inner := readParts(t, append([]byte("Content-Type: "+parts[0].header.Get("Content-Type")+"\r\n\r\n"), parts[0].body...), "multipart/alternative")
+	if len(inner) != 2 || string(inner[0].body) != "plain body" || string(inner[1].body) != "<p>html body</p>" {
+		t.Errorf("text body is not the plain and HTML versions: %+v", inner)
+	}
+
+	want := []struct {
+		mediaType string
+		filename  string
+		data      []byte
+	}{
+		{"application/pdf", "report.pdf", pdf},
+		{"application/octet-stream", "kvittering æøå.unknownext", []byte("x")},
+		{"text/plain", "notes.bin", []byte("hei")},
+	}
+	for i, w := range want {
+		part := parts[i+1]
+
+		mediaType, params, err := mime.ParseMediaType(part.header.Get("Content-Type"))
+		if err != nil {
+			t.Fatalf("%s: Content-Type: %v", w.filename, err)
+		}
+		if mediaType != w.mediaType || params["name"] != w.filename {
+			t.Errorf("%s: Content-Type is %s with name %q", w.filename, mediaType, params["name"])
+		}
+
+		disposition, params, err := mime.ParseMediaType(part.header.Get("Content-Disposition"))
+		if err != nil {
+			t.Fatalf("%s: Content-Disposition: %v", w.filename, err)
+		}
+		if disposition != "attachment" || params["filename"] != w.filename {
+			t.Errorf("%s: Content-Disposition is %s with filename %q", w.filename, disposition, params["filename"])
+		}
+
+		if encoding := part.header.Get("Content-Transfer-Encoding"); encoding != "base64" {
+			t.Errorf("%s: Content-Transfer-Encoding is %q", w.filename, encoding)
+		}
+		for _, line := range strings.Split(strings.TrimRight(string(part.body), "\r\n"), "\r\n") {
+			if len(line) > 76 {
+				t.Errorf("%s: base64 line of %d characters", w.filename, len(line))
+			}
+		}
+		decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(string(part.body), "\r\n", ""))
+		if err != nil {
+			t.Fatalf("%s: base64: %v", w.filename, err)
+		}
+		if !bytes.Equal(decoded, w.data) {
+			t.Errorf("%s: content changed on the way through", w.filename)
+		}
+	}
+}
+
+func TestBuildMIMEMessage_WithoutAttachmentsStaysAlternative(t *testing.T) {
+	raw, err := buildMIMEMessage([]string{"a@example.com"}, nil, nil, "Subject", "plain", "<p>html</p>", nil)
+	if err != nil {
+		t.Fatalf("buildMIMEMessage() error: %v", err)
+	}
+	if parts := readParts(t, raw, "multipart/alternative"); len(parts) != 2 {
+		t.Errorf("got %d parts, want the plain and HTML versions", len(parts))
+	}
+}
+
+type mimePart struct {
+	header textproto.MIMEHeader
+	body   []byte
+}
+
+// readParts parses a raw message and returns the parts of its multipart body, which must be of the given type.
+func readParts(t *testing.T, raw []byte, wantType string) []mimePart {
+	t.Helper()
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("failed to read message: %v", err)
+	}
+	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatalf("failed to parse Content-Type: %v", err)
+	}
+	if mediaType != wantType {
+		t.Fatalf("message is %s, want %s", mediaType, wantType)
+	}
+	var parts []mimePart
+	reader := multipart.NewReader(msg.Body, params["boundary"])
+	for {
+		part, err := reader.NextRawPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("failed to read part: %v", err)
+		}
+		body, err := io.ReadAll(part)
+		if err != nil {
+			t.Fatalf("failed to read part body: %v", err)
+		}
+		parts = append(parts, mimePart{header: part.Header, body: body})
+	}
+	return parts
 }
 
 // extractHeader extracts a header value from a raw RFC 2822 message string.
