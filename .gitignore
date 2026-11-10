@@ -1,5 +1,5 @@
 # Binaries
-gmail-cli
+/gmail-cli
 *.exe
 *.exe~
 *.dll
