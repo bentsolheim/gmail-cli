@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"mime"
 	"mime/multipart"
 	"net/textproto"
+	"path/filepath"
 	"strings"
 
 	"github.com/yuin/goldmark"
@@ -34,6 +36,29 @@ type ReplyContext struct {
 	QuotedDate    string
 	QuotedPlain   string // plain text body of original
 	QuotedHTML    string // HTML body of original
+}
+
+// MaxAttachmentBytes is the combined size Gmail allows for the attachments of one message.
+const MaxAttachmentBytes = 25 << 20
+
+// DraftAttachment is a file to include in a draft.
+type DraftAttachment struct {
+	Filename string
+	// ContentType is the media type. Empty means it follows from the filename's extension.
+	ContentType string
+	Data        []byte
+}
+
+// mediaType returns the attachment's media type and its parameters.
+func (a DraftAttachment) mediaType() (string, map[string]string) {
+	contentType := a.ContentType
+	if contentType == "" {
+		contentType = mime.TypeByExtension(filepath.Ext(a.Filename))
+	}
+	if mediaType, params, err := mime.ParseMediaType(contentType); err == nil {
+		return mediaType, params
+	}
+	return "application/octet-stream", map[string]string{}
 }
 
 // GetReplyContext fetches a thread and builds the context needed for a reply draft.
@@ -73,7 +98,7 @@ func (c *Client) GetReplyContext(ctx context.Context, threadID string) (*ReplyCo
 
 // CreateDraft creates a Gmail draft from markdown content.
 // If reply is non-nil, the draft is created as a reply within that thread.
-func (c *Client) CreateDraft(ctx context.Context, to, cc, bcc []string, subject, markdownBody string, reply *ReplyContext) (*DraftResult, error) {
+func (c *Client) CreateDraft(ctx context.Context, to, cc, bcc []string, subject, markdownBody string, reply *ReplyContext, attachments []DraftAttachment) (*DraftResult, error) {
 	htmlBody, err := renderMarkdown(markdownBody)
 	if err != nil {
 		return nil, err
@@ -88,21 +113,25 @@ func (c *Client) CreateDraft(ctx context.Context, to, cc, bcc []string, subject,
 		htmlBody = appendQuotedHTML(htmlBody, attribution, reply.QuotedHTML, reply.QuotedPlain)
 	}
 
-	rawMsg, err := buildMIMEMessage(to, cc, bcc, subject, plainText, htmlBody, reply)
+	rawMsg, err := buildMIMEMessage(to, cc, bcc, subject, plainText, htmlBody, reply, attachments...)
 	if err != nil {
 		return nil, err
 	}
 
-	draftMsg := &gmail.Message{
-		Raw: base64.URLEncoding.EncodeToString(rawMsg),
-	}
+	draftMsg := &gmail.Message{}
 	if reply != nil {
 		draftMsg.ThreadId = reply.ThreadID
 	}
 
-	draft := &gmail.Draft{Message: draftMsg}
+	call := c.service.Users.Drafts.Create(c.userID, &gmail.Draft{Message: draftMsg})
+	if len(attachments) > 0 {
+		// A message with attachments goes through the upload endpoint, which takes it as it is and allows 35 MB.
+		call = call.Media(bytes.NewReader(rawMsg), googleapi.ContentType("message/rfc822"))
+	} else {
+		draftMsg.Raw = base64.URLEncoding.EncodeToString(rawMsg)
+	}
 
-	created, err := c.service.Users.Drafts.Create(c.userID, draft).Context(ctx).Do()
+	created, err := call.Context(ctx).Do()
 	if err != nil {
 		if apiErr, ok := err.(*googleapi.Error); ok && apiErr.Code == 403 {
 			return nil, fmt.Errorf("insufficient permissions for draft creation.\nRun 'gmail-cli auth' to re-authenticate with the required scopes")
@@ -227,36 +256,18 @@ func ExtractSubject(markdown string) (subject, body string) {
 	return "", markdown
 }
 
-// buildMIMEMessage constructs an RFC 2822 multipart/alternative message.
-func buildMIMEMessage(to, cc, bcc []string, subject, plainText, htmlBody string, reply *ReplyContext) ([]byte, error) {
-	// Build MIME body parts
-	var body bytes.Buffer
-	mpw := multipart.NewWriter(&body)
-
-	// text/plain part
-	plainHeader := textproto.MIMEHeader{}
-	plainHeader.Set("Content-Type", "text/plain; charset=UTF-8")
-	pw, err := mpw.CreatePart(plainHeader)
+// buildMIMEMessage constructs an RFC 2822 message: multipart/alternative with the plain text
+// and HTML bodies, wrapped in multipart/mixed together with the attachments when there are any.
+func buildMIMEMessage(to, cc, bcc []string, subject, plainText, htmlBody string, reply *ReplyContext, attachments ...DraftAttachment) ([]byte, error) {
+	body, contentType, err := buildAlternative(plainText, htmlBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create plain text part: %w", err)
+		return nil, err
 	}
-	if _, err := pw.Write([]byte(plainText)); err != nil {
-		return nil, fmt.Errorf("failed to write plain text: %w", err)
-	}
-
-	// text/html part
-	htmlHeader := textproto.MIMEHeader{}
-	htmlHeader.Set("Content-Type", "text/html; charset=UTF-8")
-	hw, err := mpw.CreatePart(htmlHeader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create HTML part: %w", err)
-	}
-	if _, err := hw.Write([]byte(htmlBody)); err != nil {
-		return nil, fmt.Errorf("failed to write HTML: %w", err)
-	}
-
-	if err := mpw.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close multipart writer: %w", err)
+	if len(attachments) > 0 {
+		body, contentType, err = buildMixed(body, contentType, attachments)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Build complete message with headers
@@ -276,9 +287,98 @@ func buildMIMEMessage(to, cc, bcc []string, subject, plainText, htmlBody string,
 		fmt.Fprintf(&msg, "References: %s\r\n", reply.References)
 	}
 	fmt.Fprintf(&msg, "MIME-Version: 1.0\r\n")
-	fmt.Fprintf(&msg, "Content-Type: multipart/alternative; boundary=%q\r\n", mpw.Boundary())
+	fmt.Fprintf(&msg, "Content-Type: %s\r\n", contentType)
 	fmt.Fprintf(&msg, "\r\n")
-	msg.Write(body.Bytes())
+	msg.Write(body)
 
 	return msg.Bytes(), nil
+}
+
+// buildAlternative builds the multipart/alternative body with the plain text and HTML versions.
+// It returns the body and the Content-Type header value that goes with it.
+func buildAlternative(plainText, htmlBody string) ([]byte, string, error) {
+	var body bytes.Buffer
+	mpw := multipart.NewWriter(&body)
+
+	// text/plain part
+	plainHeader := textproto.MIMEHeader{}
+	plainHeader.Set("Content-Type", "text/plain; charset=UTF-8")
+	pw, err := mpw.CreatePart(plainHeader)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to create plain text part: %w", err)
+	}
+	if _, err := pw.Write([]byte(plainText)); err != nil {
+		return nil, "", fmt.Errorf("failed to write plain text: %w", err)
+	}
+
+	// text/html part
+	htmlHeader := textproto.MIMEHeader{}
+	htmlHeader.Set("Content-Type", "text/html; charset=UTF-8")
+	hw, err := mpw.CreatePart(htmlHeader)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to create HTML part: %w", err)
+	}
+	if _, err := hw.Write([]byte(htmlBody)); err != nil {
+		return nil, "", fmt.Errorf("failed to write HTML: %w", err)
+	}
+
+	if err := mpw.Close(); err != nil {
+		return nil, "", fmt.Errorf("failed to close multipart writer: %w", err)
+	}
+
+	return body.Bytes(), fmt.Sprintf("multipart/alternative; boundary=%q", mpw.Boundary()), nil
+}
+
+// buildMixed builds a multipart/mixed body with the given text body first and the attachments after it.
+// It returns the body and the Content-Type header value that goes with it.
+func buildMixed(textBody []byte, textContentType string, attachments []DraftAttachment) ([]byte, string, error) {
+	var body bytes.Buffer
+	mpw := multipart.NewWriter(&body)
+
+	textHeader := textproto.MIMEHeader{}
+	textHeader.Set("Content-Type", textContentType)
+	tw, err := mpw.CreatePart(textHeader)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to create text part: %w", err)
+	}
+	if _, err := tw.Write(textBody); err != nil {
+		return nil, "", fmt.Errorf("failed to write text part: %w", err)
+	}
+
+	for _, attachment := range attachments {
+		mediaType, params := attachment.mediaType()
+		params["name"] = attachment.Filename
+
+		header := textproto.MIMEHeader{}
+		header.Set("Content-Type", mime.FormatMediaType(mediaType, params))
+		header.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": attachment.Filename}))
+		header.Set("Content-Transfer-Encoding", "base64")
+		aw, err := mpw.CreatePart(header)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to create part for %s: %w", attachment.Filename, err)
+		}
+		if err := writeBase64Lines(aw, attachment.Data); err != nil {
+			return nil, "", fmt.Errorf("failed to write %s: %w", attachment.Filename, err)
+		}
+	}
+
+	if err := mpw.Close(); err != nil {
+		return nil, "", fmt.Errorf("failed to close multipart writer: %w", err)
+	}
+
+	return body.Bytes(), fmt.Sprintf("multipart/mixed; boundary=%q", mpw.Boundary()), nil
+}
+
+// writeBase64Lines writes data as base64 in the 76-character lines that MIME requires.
+func writeBase64Lines(w io.Writer, data []byte) error {
+	const lineLength = 76
+	encoded := base64.StdEncoding.EncodeToString(data)
+	for len(encoded) > 0 {
+		n := min(lineLength, len(encoded))
+		if _, err := io.WriteString(w, encoded[:n]+"\r\n"); err != nil {
+			return err
+		}
+		encoded = encoded[n:]
+	}
+	return nil
 }

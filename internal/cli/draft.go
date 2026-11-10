@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/bentsolheim/gmail-cli/internal/gmail"
@@ -18,6 +19,7 @@ var (
 	draftSubject string
 	draftReplyTo string
 	draftNoQuote bool
+	draftAttach  []string
 )
 
 var draftCmd = &cobra.Command{
@@ -52,11 +54,16 @@ Reply drafts:
   Note: a blockquote style was considered for quoting but rejected in favor
   of a separator line with attribution, which renders more cleanly in Gmail.
 
+Attachments:
+  Use --attach <file> once per file. The file keeps its name, and its type
+  follows from the extension. Gmail allows 25 MB of attachments per message.
+
 Examples:
   gmail-cli draft create --to a@x.com < email.md
   echo "# Subject\n\nBody" | gmail-cli draft create --to user@example.com
   gmail-cli draft create --to a@x.com --subject "Override" < email.md
-  echo "Thanks" | gmail-cli draft create --to a@x.com --reply-to <thread-id>`,
+  echo "Thanks" | gmail-cli draft create --to a@x.com --reply-to <thread-id>
+  gmail-cli draft create --to a@x.com --attach report.pdf --attach data.csv < email.md`,
 	RunE: runDraftCreate,
 }
 
@@ -67,6 +74,7 @@ func init() {
 	draftCreateCmd.Flags().StringVar(&draftSubject, "subject", "", "Email subject line")
 	draftCreateCmd.Flags().StringVar(&draftReplyTo, "reply-to", "", "Thread ID to reply to")
 	draftCreateCmd.Flags().BoolVar(&draftNoQuote, "no-quote", false, "Omit original message when replying")
+	draftCreateCmd.Flags().StringArrayVar(&draftAttach, "attach", nil, "File to attach (can be specified multiple times)")
 	_ = draftCreateCmd.MarkFlagRequired("to")
 
 	draftCmd.AddCommand(draftCreateCmd)
@@ -96,6 +104,11 @@ func runDraftCreate(cmd *cobra.Command, args []string) error {
 	extracted, remaining := gmail.ExtractSubject(markdownBody)
 	if extracted != "" {
 		markdownBody = remaining
+	}
+
+	attachments, err := readAttachments(draftAttach)
+	if err != nil {
+		return err
 	}
 
 	ctx := context.Background()
@@ -132,14 +145,35 @@ func runDraftCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no --subject flag, no '# Title' heading, and no --reply-to thread to derive subject from")
 	}
 
-	result, err := client.CreateDraft(ctx, draftTo, draftCc, draftBcc, subject, markdownBody, reply)
+	result, err := client.CreateDraft(ctx, draftTo, draftCc, draftBcc, subject, markdownBody, reply, attachments)
 	if err != nil {
 		return err
 	}
 
 	fmt.Println("Draft created successfully.")
 	fmt.Printf("Draft ID: %s\n", result.DraftID)
+	for _, attachment := range attachments {
+		fmt.Printf("Attached: %s (%d bytes)\n", attachment.Filename, len(attachment.Data))
+	}
 	fmt.Printf("View in Gmail: https://mail.google.com/mail/u/0/#drafts\n")
 
 	return nil
+}
+
+// readAttachments reads the files to attach, and refuses more than Gmail allows in one message.
+func readAttachments(paths []string) ([]gmail.DraftAttachment, error) {
+	var attachments []gmail.DraftAttachment
+	total := 0
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read attachment: %w", err)
+		}
+		total += len(data)
+		attachments = append(attachments, gmail.DraftAttachment{Filename: filepath.Base(path), Data: data})
+	}
+	if total > gmail.MaxAttachmentBytes {
+		return nil, fmt.Errorf("the attachments are %d bytes together; Gmail allows %d", total, gmail.MaxAttachmentBytes)
+	}
+	return attachments, nil
 }
